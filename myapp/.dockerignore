@@ -1,0 +1,15 @@
+# Ignore everything in target EXCEPT built jars
+target/*
+!target/*.jar
+
+# IDE files
+.idea/
+*.iml
+
+# Git metadata
+.git/
+.gitignore
+
+# Logs & OS cruft
+*.log
+.DS_Store
