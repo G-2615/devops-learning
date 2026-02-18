@@ -1,0 +1,43 @@
+name: Build & Push Docker Image
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build JAR
+        run: mvn -q -DskipTests clean package
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.CR_PAT }}" | docker login ghcr.io -u ${{ secrets.USERNAME }} --password-stdin
+
+      - name: Build Docker image
+        run: |
+          IMAGE=ghcr.io/${{ secrets.USERNAME }}/myapp
+          TAG=${{ github.sha }}
+          docker build -t $IMAGE:$TAG -t $IMAGE:latest myapp
+
+      - name: Push Docker image
+        run: |
+          IMAGE=ghcr.io/${{ secrets.USERNAME }}/myapp
+          TAG=${{ github.sha }}
+          docker push $IMAGE:$TAG
+          docker push $IMAGE:latest
