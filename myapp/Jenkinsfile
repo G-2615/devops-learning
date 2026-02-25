@@ -1,0 +1,127 @@
+pipeline {
+  agent any
+
+  environment {
+    REGISTRY        = "docker.io"
+    REGISTRY_USER   = "gauravkbhardwaj3538"
+    IMAGE_NAME      = "demo-app"
+    FULL_IMAGE      = "${REGISTRY}/${REGISTRY_USER}/${IMAGE_NAME}"
+    K8S_NAMESPACE   = "default"
+  }
+
+  options {
+    timestamps()
+    ansiColor('xterm')
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout([$class: 'GitSCM',
+          branches: [[name: '*/main']],
+          userRemoteConfigs: [[
+            url: 'https://github.com/G-2615/devops-learning.git',
+            credentialsId: 'github-token'
+          ]]
+        ])
+        script {
+          env.SHORT_SHA = sh(script: "git rev-parse --short=7 HEAD", returnStdout: true).trim()
+          env.VERSION_TAG = "sha-${env.SHORT_SHA}"
+        }
+      }
+    }
+
+    stage('Build JAR (Maven)') {
+      steps {
+        sh '''
+          if [ -f mvnw ]; then
+            chmod +x mvnw
+            ./mvnw -B -DskipTests clean package
+          else
+            mvn -B -DskipTests clean package
+          fi
+        '''
+      }
+      post {
+        success {
+          archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
+        }
+      }
+    }
+
+    stage('Docker Build & Tag') {
+      steps {
+        sh '''
+          echo "Building Docker image ${FULL_IMAGE}:${VERSION_TAG}"
+          docker build -t ${FULL_IMAGE}:${VERSION_TAG} -t ${FULL_IMAGE}:latest .
+        '''
+      }
+    }
+
+    stage('Docker Login & Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+          sh '''
+            echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
+            docker push ${FULL_IMAGE}:${VERSION_TAG}
+            docker push ${FULL_IMAGE}:latest
+          '''
+        }
+      }
+    }
+
+    stage('Kubernetes Apply Manifests') {
+      steps {
+        withCredentials([string(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_CONTENT')]) {
+          sh '''
+            mkdir -p $WORKSPACE/.kube
+            echo "$KUBECONFIG_CONTENT" > $WORKSPACE/.kube/config
+            export KUBECONFIG=$WORKSPACE/.kube/config
+
+            kubectl -n ${K8S_NAMESPACE} apply -f k8s/
+          '''
+        }
+      }
+    }
+
+    stage('Update Image to Version Tag') {
+      steps {
+        withCredentials([string(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_CONTENT')]) {
+          sh '''
+            export KUBECONFIG=$WORKSPACE/.kube/config
+            kubectl -n ${K8S_NAMESPACE} set image deploy/demo-app demo-app=${FULL_IMAGE}:${VERSION_TAG} --record=true
+          '''
+        }
+      }
+    }
+
+    stage('Rollout & Health Check') {
+      steps {
+        withCredentials([string(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_CONTENT')]) {
+          sh '''
+            export KUBECONFIG=$WORKSPACE/.kube/config
+            set -e
+            kubectl -n ${K8S_NAMESPACE} rollout status deploy/demo-app --timeout=180s
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "✅ Deployed ${FULL_IMAGE}:${VERSION_TAG} successfully."
+    }
+    failure {
+      echo "❌ Deployment failed — attempting rollback."
+      script {
+        withCredentials([string(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_CONTENT')]) {
+          sh '''
+            export KUBECONFIG=$WORKSPACE/.kube/config
+            kubectl -n ${K8S_NAMESPACE} rollout undo deploy/demo-app || true
+          '''
+        }
+      }
+    }
+  }
+}
